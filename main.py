@@ -8,6 +8,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
+import io
+import zipfile
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,6 +17,9 @@ DATA_FILE = os.path.join(BASE_DIR, "fantasy_data.json")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 API_BASE = "https://api.cricapi.com/v1"
+CRICBUZZ_LIVE_URL = "https://www.cricbuzz.com/cricket-match/live-scores"
+CRICBUZZ_RECENT_URL = "https://www.cricbuzz.com/cricket-match/live-scores/recent-matches"
+CRICSHEET_IPL_JSON_ZIP = "https://cricsheet.org/downloads/ipl_json.zip"
 
 DEFAULT_SETTINGS = {
     "cricketdata_api_key": os.environ.get("CRICKETDATA_API_KEY", "").strip(),
@@ -48,6 +53,41 @@ WICKETKEEPERS = {
     "R R Pant",
     "S V Samson",
     "T L Seifert",
+}
+
+ALIAS_SIGNATURES = {
+    "C V Varun": ["varunchakravarthy", "chakravarthy", "chakravarty", "varun"],
+    "S A Yadav": ["suryakumaryadav", "suryakumar", "sky", "skyyadav"],
+    "R G Sharma": ["rohitsharma", "rohit"],
+    "A K Markram": ["aidenmarkram", "markram"],
+    "B Kumar": ["bhuvneshwarkumar", "bhuvneshwar"],
+    "K R Sen": ["kuldeepsen", "sen"],
+    "C Bosch": ["corbinbosch", "bosch"],
+    "R D Rickelton": ["ryanrickelton", "rickelton"],
+    "Q de Kock": ["quintondekock", "dekock", "dekock"],
+    "L S Livingstone": ["liamlivingstone", "livingstone"],
+    "A F Milne": ["adammilne", "milne"],
+    "A J Hosein": ["akealhosein", "hosein"],
+    "J C Buttler": ["josbuttler", "buttler"],
+    "J J Bumrah": ["jaspritbumrah", "bumrah"],
+    "M R Marsh": ["mitchellmarsh", "marsh"],
+    "J O Holder": ["jasonholder", "holder"],
+    "V R Iyer": ["venkateshiyer", "venkatesh"],
+    "V G Arora": ["vaibhavarora"],
+    "P P Shaw": ["prithvishaw"],
+    "T M Head": ["travishead"],
+    "V Kohli": ["viratkohli", "virat"],
+    "J Overton": ["jamieoverton"],
+    "N Wadhera": ["nehalwadhera"],
+    "R D Gaikwad": ["ruturajgaikwad", "ruturaj"],
+    "S S Iyer": ["shreyasiyer", "shreyas"],
+    "P J Cummins": ["patcummins", "pat"],
+    "N Burger": ["nandreburger"],
+    "J D Unadkat": ["jaydevunadkat"],
+    "R A Jadeja": ["ravindrajadeja"],
+    "K H Pandya": ["krunalpandya", "krunal"],
+    "H H Pandya": ["hardikpandya", "hardik"],
+    "M J Henry": ["matthenry", "matthewhenry"],
 }
 
 HOWSTAT_POINT_RULES = {
@@ -314,6 +354,8 @@ def signatures_for_name(name):
         signatures.add(initials)
     if len(tokens) >= 2:
         signatures.add(tokens[0] + tokens[-1])
+        signatures.add(tokens[0])
+    signatures.update(ALIAS_SIGNATURES.get(name, []))
     return {signature for signature in signatures if signature}
 
 
@@ -535,7 +577,7 @@ def aggregate_player_totals(player, owner, state):
 
 
 def leaderboard_state():
-    state = load_state()
+    state = maybe_refresh_state()
     owners = []
     for owner in state["owners"]:
         enriched_players = []
@@ -567,6 +609,7 @@ def leaderboard_state():
         "point_rules": HOWSTAT_POINT_RULES,
         "live_matches": state.get("live_matches", []),
         "match_catalog": state.get("match_catalog", {}),
+        "matches_for_changes": ordered_match_catalog(state),
         "last_sync_at": state.get("last_sync_at"),
         "last_sync_message": state.get("last_sync_message"),
         "settings": {
@@ -575,6 +618,18 @@ def leaderboard_state():
             "has_api_key": bool(state["settings"].get("cricketdata_api_key")),
         },
     }
+
+
+def ordered_match_catalog(state):
+    catalog = list((state.get("match_catalog") or {}).values())
+    catalog.sort(
+        key=lambda item: (
+            str(item.get("date_time_gmt") or ""),
+            int(item.get("match_number") or 9999) if str(item.get("match_number") or "").isdigit() else 9999,
+            str(item.get("name") or ""),
+        )
+    )
+    return catalog
 
 
 def get_setting_api_key(state):
@@ -830,6 +885,326 @@ def apply_captain_change(state, owner_name, new_captain, new_vice_captain, from_
     save_state(state)
 
 
+def fetch_text(url):
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/html,application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read().decode("utf-8", errors="ignore")
+
+
+def fetch_bytes(url):
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "*/*",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read()
+
+
+def extract_escaped_json(html, token):
+    start = html.find(token)
+    if start == -1:
+        return None
+    start += len(token)
+    data = html[start:]
+    opening = data[0]
+    closing = "]" if opening == "[" else "}"
+    depth = 0
+    in_string = False
+    escape = False
+    end = None
+    for index, char in enumerate(data):
+        if escape:
+            escape = False
+            continue
+        if char == "\\":
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if char == opening:
+                depth += 1
+            elif char == closing:
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+    if end is None:
+        return None
+    snippet = data[:end]
+    return json.loads(snippet.encode("utf-8").decode("unicode_escape"))
+
+
+def parse_match_number(text):
+    if text is None:
+        return None
+    match = re.search(r"(\d+)", str(text))
+    return int(match.group(1)) if match else None
+
+
+def canonical_match_key(match_number, fallback_id):
+    if match_number is not None:
+        return f"IPL2026-M{int(match_number):02d}"
+    return str(fallback_id)
+
+
+def derive_player_stats_from_scorecards(scorecards):
+    stats_by_player = {}
+
+    def ensure(name):
+        stats_by_player.setdefault(name, {"runs": 0, "wickets": 0, "catches": 0, "stumpings": 0})
+
+    for innings in scorecards or []:
+        batters = ((innings.get("batTeamDetails") or {}).get("batsmenData") or {}).values()
+        for batter in batters:
+            name = batter.get("batName")
+            if not name:
+                continue
+            ensure(name)
+            stats_by_player[name]["runs"] += int_value(batter.get("runs"))
+
+            out_desc = str(batter.get("outDesc") or "")
+            st_match = re.search(r"\bst\s+([A-Za-z .'-]+?)\s+b\b", out_desc, re.IGNORECASE)
+            if st_match:
+                ensure(st_match.group(1))
+                stats_by_player[st_match.group(1)]["stumpings"] += 1
+            catch_match = re.search(r"\bc\s+([A-Za-z .'-]+?)\s+b\b", out_desc, re.IGNORECASE)
+            if catch_match and "&" not in catch_match.group(1):
+                ensure(catch_match.group(1))
+                stats_by_player[catch_match.group(1)]["catches"] += 1
+
+        bowlers = ((innings.get("bowlTeamDetails") or {}).get("bowlersData") or {}).values()
+        for bowler in bowlers:
+            name = bowler.get("bowlName")
+            if not name:
+                continue
+            ensure(name)
+            stats_by_player[name]["wickets"] += int_value(bowler.get("wickets"))
+
+    return stats_by_player
+
+
+def discover_cricbuzz_ipl_matches():
+    discovered = {}
+    for url in [CRICBUZZ_LIVE_URL, CRICBUZZ_RECENT_URL]:
+        html = fetch_text(url)
+        for match_id, slug in re.findall(r"/live-cricket-scores/(\d+)/([^\"\\'\s<]+)", html):
+            if "indian-premier-league-2026" not in slug and "ipl-2026" not in slug:
+                continue
+            discovered[match_id] = slug
+    return discovered
+
+
+def scrape_cricbuzz_match(match_id, slug):
+    url = f"https://www.cricbuzz.com/live-cricket-scorecard/{match_id}/{slug}"
+    html = fetch_text(url)
+    scorecards = extract_escaped_json(html, 'scoreCard\\":') or []
+    match_header = extract_escaped_json(html, 'matchHeader\\":') or {}
+    match_info = extract_escaped_json(html, 'matchInfo\\":') or {}
+    status = str(match_header.get("status") or match_info.get("status") or "")
+    match_desc = str(match_header.get("matchDescription") or match_info.get("matchDesc") or "")
+    match_number = parse_match_number(match_desc)
+    match_key = canonical_match_key(match_number, match_id)
+    teams = []
+    team1 = ((match_header.get("team1") or {}).get("name") or (match_info.get("team1") or {}).get("teamName") or "")
+    team2 = ((match_header.get("team2") or {}).get("name") or (match_info.get("team2") or {}).get("teamName") or "")
+    if team1 and team2:
+        teams = [team1, team2]
+    stats = derive_player_stats_from_scorecards(scorecards)
+    return {
+        "match_id": str(match_id),
+        "match_key": match_key,
+        "match_number": match_number,
+        "name": f"{team1} vs {team2}".strip(" vs ") if teams else slug.replace("-", " "),
+        "status": status,
+        "slug": slug,
+        "teams": teams,
+        "scorecards": scorecards,
+        "stats": stats,
+        "date_time_gmt": "",
+        "is_complete": str(match_header.get("state") or "").lower() == "complete" or "won by" in status.lower(),
+    }
+
+
+def cricsheet_match_stats(match_data):
+    stats_by_player = {}
+
+    def ensure(name):
+        stats_by_player.setdefault(name, {"runs": 0, "wickets": 0, "catches": 0, "stumpings": 0})
+
+    for innings in match_data.get("innings", []):
+        for over in innings.get("overs", []):
+            for delivery in over.get("deliveries", []):
+                batter = delivery.get("batter")
+                if batter:
+                    ensure(batter)
+                    stats_by_player[batter]["runs"] += int_value((delivery.get("runs") or {}).get("batter"))
+
+                wicket_entries = delivery.get("wickets") or []
+                for wicket in wicket_entries:
+                    kind = str(wicket.get("kind") or "").lower()
+                    bowler = delivery.get("bowler")
+                    if bowler and kind not in {"run out", "retired hurt", "retired out", "obstructing the field"}:
+                        ensure(bowler)
+                        stats_by_player[bowler]["wickets"] += 1
+                    for fielder in wicket.get("fielders") or []:
+                        name = fielder.get("name")
+                        if not name:
+                            continue
+                        ensure(name)
+                        if kind == "stumped":
+                            stats_by_player[name]["stumpings"] += 1
+                        elif kind == "caught":
+                            stats_by_player[name]["catches"] += 1
+
+    return stats_by_player
+
+
+def apply_match_stats(state, match_key, match_name, match_number, match_date, stats_by_external_name, source):
+    mapped_count = 0
+    player_lookup = {}
+    for owner in state["owners"]:
+        for player in owner["players"]:
+            player_lookup[player["player_name"]] = player
+
+    for external_name, stats in stats_by_external_name.items():
+        resolved = resolve_player_name(external_name, state)
+        if not resolved:
+            continue
+        player_lookup[resolved]["matches"][match_key] = {
+            "match_name": match_name,
+            "match_number": match_number,
+            "match_date": match_date,
+            "runs": int_value(stats.get("runs")),
+            "wickets": int_value(stats.get("wickets")),
+            "catches": int_value(stats.get("catches")),
+            "stumpings": int_value(stats.get("stumpings")),
+            "source": source,
+            "last_updated": dt.datetime.now().isoformat(timespec="seconds"),
+        }
+        mapped_count += 1
+
+    state.setdefault("match_catalog", {})
+    state["match_catalog"][match_key] = {
+        "id": match_key,
+        "name": match_name,
+        "match_number": match_number,
+        "date_time_gmt": match_date,
+        "status": source,
+    }
+    return mapped_count
+
+
+def backfill_from_cricsheet(state):
+    raw = fetch_bytes(CRICSHEET_IPL_JSON_ZIP)
+    archive = zipfile.ZipFile(io.BytesIO(raw))
+    processed = 0
+    for file_name in archive.namelist():
+        if not file_name.endswith(".json"):
+            continue
+        match = json.loads(archive.read(file_name).decode("utf-8"))
+        info = match.get("info", {})
+        event = info.get("event", {})
+        if event.get("name") != "Indian Premier League":
+            continue
+        dates = info.get("dates", [])
+        if not dates or not str(dates[0]).startswith("2026-"):
+            continue
+        match_number = parse_match_number(event.get("match_number"))
+        match_key = canonical_match_key(match_number, file_name.replace(".json", ""))
+        match_name = " vs ".join(info.get("teams", []))
+        stats = cricsheet_match_stats(match)
+        apply_match_stats(
+            state=state,
+            match_key=match_key,
+            match_name=match_name,
+            match_number=match_number,
+            match_date=str(dates[0]),
+            stats_by_external_name=stats,
+            source="cricsheet",
+        )
+        processed += 1
+    state["historical_backfill_at"] = dt.datetime.now().isoformat(timespec="seconds")
+    return processed
+
+
+def refresh_live_from_cricbuzz(state):
+    discovered = discover_cricbuzz_ipl_matches()
+    live_matches = []
+    for match_id, slug in discovered.items():
+        try:
+            match = scrape_cricbuzz_match(match_id, slug)
+        except Exception:
+            continue
+        apply_match_stats(
+            state=state,
+            match_key=match["match_key"],
+            match_name=match["name"],
+            match_number=match["match_number"],
+            match_date=match["date_time_gmt"],
+            stats_by_external_name=match["stats"],
+            source="cricbuzz",
+        )
+        live_matches.append(
+            {
+                "id": match["match_key"],
+                "name": match["name"],
+                "status": match["status"],
+                "match_number": match["match_number"],
+                "score_summary": match["status"],
+            }
+        )
+    state["live_matches"] = sorted(live_matches, key=lambda item: (item.get("match_number") is None, item.get("match_number") or 999))
+    state["last_live_sync_at"] = dt.datetime.now().isoformat(timespec="seconds")
+    return len(live_matches)
+
+
+def maybe_refresh_state(force=False):
+    state = load_state()
+    now = dt.datetime.now()
+    hist_due = force or not state.get("historical_backfill_at")
+    live_due = force or not state.get("last_live_sync_at")
+    if not hist_due and state.get("historical_backfill_at"):
+        try:
+            hist_due = (now - dt.datetime.fromisoformat(state["historical_backfill_at"])).total_seconds() > 21600
+        except Exception:
+            hist_due = True
+    if not live_due and state.get("last_live_sync_at"):
+        try:
+            live_due = (now - dt.datetime.fromisoformat(state["last_live_sync_at"])).total_seconds() > 20
+        except Exception:
+            live_due = True
+
+    notes = []
+    if hist_due:
+        try:
+            processed = backfill_from_cricsheet(state)
+            notes.append(f"historical backfill ok ({processed} matches)")
+        except Exception as exc:
+            notes.append(f"historical backfill failed: {exc}")
+    if live_due:
+        try:
+            current = refresh_live_from_cricbuzz(state)
+            notes.append(f"live refresh ok ({current} tracked matches)")
+        except Exception as exc:
+            notes.append(f"live refresh failed: {exc}")
+    if notes:
+        state["last_sync_message"] = " | ".join(notes)
+        state["last_sync_at"] = now.isoformat(timespec="seconds")
+        save_state(state)
+    return state
+
+
 def sync_selected_matches(state):
     api_key = get_setting_api_key(state)
     if not api_key:
@@ -879,6 +1254,87 @@ def sync_selected_matches(state):
     state["last_sync_message"] = f"Synced {len(synced)} match(es): " + ", ".join(synced)
     save_state(state)
     return synced
+
+
+LEADERBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IPL 2026 Fantasy Leaderboard</title>
+  <style>
+    :root {
+      --bg1: #07121d; --bg2: #10243a; --panel: rgba(10,22,38,.85); --line: rgba(255,255,255,.09);
+      --text: #f4f7fb; --muted: #96abc2; --gold: #ffbe0b; --green: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; color: var(--text); font-family: "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top left, rgba(255,190,11,.17), transparent 24%),
+                  linear-gradient(160deg, var(--bg1), var(--bg2));
+      min-height: 100vh;
+    }
+    .shell { width: min(760px, calc(100% - 20px)); margin: 14px auto 24px; }
+    .hero, .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 22px; backdrop-filter: blur(16px);
+    }
+    .hero { padding: 22px 18px; }
+    h1 { margin: 0; font-size: clamp(28px, 7vw, 42px); text-transform: uppercase; letter-spacing: .04em; }
+    .sub { margin-top: 10px; color: var(--muted); line-height: 1.5; font-size: 14px; }
+    .meta { margin-top: 12px; display: inline-block; background: rgba(52,211,153,.12); color: var(--green); padding: 8px 12px; border-radius: 999px; font-size: 12px; }
+    .list { margin-top: 16px; display: grid; gap: 12px; }
+    .card { padding: 14px; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .left { display: flex; gap: 12px; align-items: center; min-width: 0; }
+    .rank { width: 40px; height: 40px; border-radius: 14px; display: grid; place-items: center; font-weight: 700;
+      background: linear-gradient(180deg, rgba(255,190,11,.22), rgba(255,190,11,.06)); color: var(--gold); flex: 0 0 auto; }
+    .name { font-size: 19px; font-weight: 700; }
+    .tiny { color: var(--muted); font-size: 12px; line-height: 1.4; }
+    .pts { color: var(--green); font-size: 26px; font-weight: 800; white-space: nowrap; }
+    .matches { margin-top: 18px; padding: 14px; }
+    .match { padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,.06); }
+    .match:last-child { border-bottom: 0; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h1>IPL 2026</h1>
+      <div class="sub">Fantasy leaderboard with automatic historical backfill and live score refresh.</div>
+      <div class="meta" id="syncText">Loading latest points...</div>
+    </section>
+    <section class="list" id="leaderboard"></section>
+    <section class="hero matches">
+      <div style="font-weight:700;font-size:18px;">Tracked Matches</div>
+      <div id="matches" class="sub">Loading matches...</div>
+    </section>
+  </div>
+  <script>
+    async function refreshBoard() {
+      const response = await fetch('/api/state');
+      const state = await response.json();
+      document.getElementById('syncText').textContent = state.last_sync_message || 'Live refresh running';
+      document.getElementById('leaderboard').innerHTML = state.owners.map((owner, index) => `
+        <div class="card">
+          <div class="left">
+            <div class="rank">#${index + 1}</div>
+            <div>
+              <div class="name">${owner.owner_name}</div>
+              <div class="tiny">Captain: ${owner.captain} | VC: ${owner.vice_captain}</div>
+            </div>
+          </div>
+          <div class="pts">${owner.total_points}</div>
+        </div>
+      `).join('');
+      document.getElementById('matches').innerHTML = state.live_matches.length
+        ? state.live_matches.map(match => `<div class="match"><div style="font-weight:700">${match.name}</div><div class="tiny">${match.status}</div></div>`).join('')
+        : 'No current IPL live matches detected right now.';
+    }
+    refreshBoard();
+    setInterval(refreshBoard, 15000);
+  </script>
+</body>
+</html>
+"""
 
 
 HTML = r"""<!DOCTYPE html>
@@ -970,24 +1426,19 @@ HTML = r"""<!DOCTYPE html>
   <div class="shell">
     <section class="hero">
       <h1>IPL 2026 Fantasy League</h1>
-      <p>Your real owners, players, captains, vice-captains, and Howstat point system are loaded. Live sync uses CricketData because Cricinfo blocks direct backend access.</p>
+      <p>Admin view for the fantasy league. Public users should only use the main leaderboard page. This panel is only for checking tracked matches and using one-time captain and vice-captain changes.</p>
       <div class="status-bar" id="syncBadge">Waiting for first sync</div>
     </section>
 
     <div class="grid">
       <section class="panel">
-        <h2>Live Setup</h2>
-        <div class="sub">Create a free CricketData account, copy the API key from its dashboard, paste it here once, then refresh IPL matches and sync live scores.</div>
+        <h2>Admin Tools</h2>
+        <div class="sub">The app backfills old IPL 2026 matches automatically from Cricsheet and refreshes live scorecards automatically from Cricbuzz. Use this page only when you want to force a refresh or apply one-time captain changes.</div>
         <div class="toolbar">
-          <input id="apiKey" type="password" placeholder="Paste CricketData API key here">
-          <button onclick="saveSettings()">Save API Key</button>
-        </div>
-        <div class="toolbar">
-          <button onclick="refreshMatches()">Refresh IPL Matches</button>
-          <button onclick="syncLive()">Sync Selected Matches</button>
+          <button onclick="forceRefresh()">Force Refresh Now</button>
           <button class="ghost" onclick="refreshState()">Refresh Screen</button>
         </div>
-        <div class="warning">Free CricketData keys are limited, so this app does not auto-hit the API every few seconds. The leaderboard refreshes instantly after each sync.</div>
+        <div class="warning">No API key is needed. Automatic updates run in the background whenever people open the site, and the public leaderboard refreshes itself every 15 seconds.</div>
         <div id="message" class="message"></div>
       </section>
 
@@ -1001,13 +1452,13 @@ HTML = r"""<!DOCTYPE html>
     <div class="grid">
       <section class="panel">
         <h2>Leaderboard</h2>
-        <div class="sub">Owner totals are cumulative across all synced matches.</div>
+        <div class="sub">Owner totals are cumulative across all backfilled and live-refreshed matches.</div>
         <div id="leaderboard"></div>
       </section>
 
       <section class="panel">
         <h2>Detected IPL Matches</h2>
-        <div class="sub">Pick the live or recent IPL matches you want to sync into fantasy points.</div>
+        <div class="sub">These are the live matches currently being tracked automatically.</div>
         <div id="matches"></div>
       </section>
     </div>
@@ -1050,20 +1501,16 @@ HTML = r"""<!DOCTYPE html>
     function renderMatches() {
       const container = document.getElementById("matches");
       if (!state.live_matches.length) {
-        container.innerHTML = `<div class="small">No IPL matches loaded yet. Save your API key, then click Refresh IPL Matches.</div>`;
+        container.innerHTML = `<div class="small">No live IPL matches detected right now. Historical matches are still counted from automatic backfill.</div>`;
         return;
       }
-      const selected = new Set(state.settings.selected_match_ids.map(String));
       container.innerHTML = state.live_matches.map(match => `
         <div class="match-item">
-          <label>
-            <input type="checkbox" ${selected.has(String(match.id)) ? "checked" : ""} onchange="toggleMatch('${match.id}', this.checked)">
-            <div>
-              <div style="font-weight:700;">${match.name}</div>
-              <div class="small">${match.status}</div>
-              <div class="small">${match.score_summary}</div>
-            </div>
-          </label>
+          <div>
+            <div style="font-weight:700;">${match.name}</div>
+            <div class="small">${match.status}</div>
+            <div class="small">${match.score_summary}</div>
+          </div>
         </div>
       `).join("");
     }
@@ -1118,7 +1565,8 @@ HTML = r"""<!DOCTYPE html>
       return value.replace(/[^a-zA-Z0-9]/g, "_");
     }
     function matchOptions() {
-      return state.live_matches.map(match => `<option value="${match.id}">${match.name}</option>`).join("");
+      const matches = state.matches_for_changes || [];
+      return matches.map(match => `<option value="${match.id}">${match.match_number ? `Match ${match.match_number}: ` : ""}${match.name}</option>`).join("");
     }
     function matchName(matchId) {
       const found = state.live_matches.find(match => String(match.id) === String(matchId));
@@ -1129,7 +1577,6 @@ HTML = r"""<!DOCTYPE html>
     function renderMeta() {
       const badge = document.getElementById("syncBadge");
       badge.textContent = state.last_sync_message || "Waiting for first sync";
-      document.getElementById("apiKey").value = "";
     }
     async function draw(payload) {
       state = payload;
@@ -1143,45 +1590,13 @@ HTML = r"""<!DOCTYPE html>
       const response = await fetch("/api/state");
       await draw(await response.json());
     }
-    async function saveSettings() {
-      const response = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: document.getElementById("apiKey").value.trim() })
-      });
-      const payload = await response.json();
-      if (payload.error) return setMessage(payload.error, true);
-      await draw(payload);
-      setMessage("API key saved.");
-    }
-    async function refreshMatches() {
-      setMessage("Refreshing IPL matches...");
-      const response = await fetch("/api/matches/refresh", { method: "POST" });
-      const payload = await response.json();
-      if (payload.error) return setMessage(payload.error, true);
-      await draw(payload);
-      setMessage("IPL matches refreshed.");
-    }
-    async function syncLive() {
-      setMessage("Syncing live scorecards...");
-      const response = await fetch("/api/sync", { method: "POST" });
+    async function forceRefresh() {
+      setMessage("Refreshing historical and live data...");
+      const response = await fetch("/api/refresh-now", { method: "POST" });
       const payload = await response.json();
       if (payload.error) return setMessage(payload.error, true);
       await draw(payload);
       setMessage(payload.last_sync_message);
-    }
-    async function toggleMatch(matchId, checked) {
-      const selected = new Set(state.settings.selected_match_ids.map(String));
-      if (checked) selected.add(String(matchId)); else selected.delete(String(matchId));
-      const response = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ selected_match_ids: Array.from(selected) })
-      });
-      const payload = await response.json();
-      if (payload.error) return setMessage(payload.error, true);
-      await draw(payload);
-      setMessage("Selected matches updated.");
     }
     async function applyCaptainChange(ownerName) {
       const id = safeId(ownerName);
@@ -1199,6 +1614,7 @@ HTML = r"""<!DOCTYPE html>
       setMessage(`Captain/VC change locked for ${ownerName}.`);
     }
     refreshState();
+    setInterval(refreshState, 15000);
   </script>
 </body>
 </html>
@@ -1230,6 +1646,9 @@ class FantasyCricketHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
+            self.html_response(LEADERBOARD_HTML)
+            return
+        if path == "/admin":
             self.html_response(HTML)
             return
         if path == "/api/state":
@@ -1240,30 +1659,8 @@ class FantasyCricketHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
-            if path == "/api/settings":
-                payload = self.read_json()
-                state = load_state()
-                api_key = payload.get("api_key")
-                if api_key is not None:
-                    state["settings"]["cricketdata_api_key"] = str(api_key).strip()
-                selected_ids = payload.get("selected_match_ids")
-                if selected_ids is not None:
-                    state["settings"]["selected_match_ids"] = [str(item) for item in selected_ids]
-                save_state(state)
-                self.json_response(leaderboard_state())
-                return
-
-            if path == "/api/matches/refresh":
-                state = load_state()
-                refresh_live_matches(state)
-                state["last_sync_message"] = "IPL matches refreshed. Select the ones you want to sync."
-                save_state(state)
-                self.json_response(leaderboard_state())
-                return
-
-            if path == "/api/sync":
-                state = load_state()
-                sync_selected_matches(state)
+            if path == "/api/refresh-now":
+                maybe_refresh_state(force=True)
                 self.json_response(leaderboard_state())
                 return
 
@@ -1284,10 +1681,10 @@ class FantasyCricketHandler(BaseHTTPRequestHandler):
             self.json_response({"error": str(exc)}, status=400)
             return
         except urllib.error.HTTPError as exc:
-            self.json_response({"error": f"Cricket API returned HTTP {exc.code}. Check your API key or plan."}, status=502)
+            self.json_response({"error": f"Live data source returned HTTP {exc.code}."}, status=502)
             return
         except urllib.error.URLError:
-            self.json_response({"error": "Could not reach the cricket API right now."}, status=502)
+            self.json_response({"error": "Could not reach the live cricket source right now."}, status=502)
             return
         except Exception as exc:
             self.json_response({"error": f"Unexpected error: {exc}"}, status=500)
