@@ -59,6 +59,57 @@ WICKETKEEPERS = {
     "T L Seifert",
 }
 
+PLAYER_TEAMS = {
+    "S P Narine": "KKR", "Ravi Bishnoi": "RR", "A R Patel": "DC",
+    "Rashid Khan": "GT", "N Pooran": "LSG", "A K Markram": "LSG",
+    "N K Reddy": "SRH", "Washington Sundar": "GT", "D A Miller": "DC",
+    "N Burger": "RR", "R D Chahar": "CSK",
+    "F H Allen": "KKR", "S A Yadav": "MI", "C Green": "KKR",
+    "J M Sharma": "RCB", "Kartik Sharma": "CSK", "K Rabada": "GT",
+    "M A Starc": "DC", "Arshdeep Singh": "PBKS", "T Natarajan": "DC",
+    "Mayank Yadav": "LSG", "Ashok Sharma": "GT",
+    "Abhishek Sharma": "SRH", "C V Varun": "KKR", "P D Salt": "RCB",
+    "T L Seifert": "KKR", "P J Cummins": "SRH", "Prabhsimran Singh": "PBKS",
+    "R D Rickelton": "MI", "Shashank Singh": "PBKS", "Vijaykumar Vyshak": "PBKS",
+    "Anuj Rawat": "GT", "S N Thakur": "MI", "Prashant Veer": "CSK",
+    "S V Samson": "CSK", "Mohammed Shami": "LSG", "Kuldeep Yadav": "DC",
+    "B Kumar": "RCB", "L Ngidi": "DC", "Rinku Singh": "KKR",
+    "Avesh Khan": "LSG", "R A Jadeja": "CSK", "Sandeep Sharma": "RR",
+    "R Parag": "RR", "Q de Kock": "MI", "K R Sen": "RR",
+    "Sai Sudharsan": "GT", "P Nissanka": "DC", "L S Livingstone": "SRH",
+    "H V Patel": "SRH", "A F Milne": "RR", "A Porel": "DC",
+    "S N Khan": "CSK", "Naman Dhir": "MI", "Tilak Varma": "MI",
+    "K H Pandya": "RCB", "M P Stoinis": "PBKS", "Priyansh Arya": "PBKS",
+    "K L Rahul": "DC", "Ishan Kishan": "SRH", "V Suryavanshi": "RR",
+    "D C Jurel": "RR", "R M Patidar": "RCB", "J G Bethell": "RCB",
+    "J D Unadkat": "SRH", "Azmatullah Omarzai": "PBKS", "A Badoni": "LSG",
+    "Ramandeep Singh": "KKR", "R S Kishore": "GT", "M S Dhoni": "CSK",
+    "T A Boult": "MI", "D L Chahar": "MI", "J R Hazlewood": "RCB",
+    "Y S Chahal": "PBKS", "Y B K Jaiswal": "RR", "Shahbaz Ahamad": "LSG",
+    "Abdul Samad": "LSG", "M Prasidh Krishna": "GT", "M J Henry": "CSK",
+    "R R Pant": "LSG", "V G Arora": "KKR", "M Pathirana": "KKR",
+    "S Dube": "CSK", "T H David": "RCB", "A J Hosein": "CSK",
+    "H H Pandya": "MI", "R Shepherd": "RCB", "M J Owen": "PBKS",
+    "Mohammed Siraj": "GT", "M J Santner": "MI", "S O Hetmeyer": "RR",
+    "A M Rahane": "KKR", "Harpreet Brar": "PBKS", "M Markande": "MI",
+    "Z Ansari": "SRH", "Ayush Mhatre": "CSK", "J C Archer": "RR",
+    "A Kumar": "MI", "V Nigam": "DC", "W G Jacks": "MI",
+    "C Bosch": "MI", "M Jansen": "PBKS", "H Klaasen": "SRH",
+    "R G Sharma": "MI", "K K Nair": "DC", "Shahrukh Khan": "PBKS",
+    "R D Gaikwad": "CSK", "S S Iyer": "PBKS", "N Rana": "DC",
+    "D Padikkal": "RCB", "G D Phillips": "GT", "T Stubbs": "DC",
+    "S E Rutherford": "MI", "Suyash Sharma": "RCB", "R Powell": "KKR",
+    "B Muzarabani": "KKR", "B A Carse": "SRH", "A Verma": "SRH",
+    "D Brevis": "CSK", "J C Buttler": "GT", "M R Marsh": "LSG",
+    "Auqib Nabi": "DC", "J J Bumrah": "MI", "Angkrish Raghuvanshi": "KKR",
+    "R Tewatia": "GT", "T U Deshpande": "RR", "Mangesh Yadav": "RCB",
+    "K K Ahmed": "CSK", "J O Holder": "GT", "V R Iyer": "RCB",
+    "Noor Ahmad": "CSK", "T M Head": "SRH", "Shivang Kumar": "SRH",
+    "V Kohli": "RCB", "L H Ferguson": "PBKS", "Ashutosh Sharma": "DC",
+    "Shubman Gill": "GT", "J Overton": "CSK", "P P Shaw": "DC",
+    "Prince Yadav": "LSG", "Digvesh Rathi": "LSG", "N Wadhera": "PBKS",
+}
+
 ALIAS_SIGNATURES = {
     "C V Varun": ["varunchakravarthy", "chakravarthy", "chakravarty", "varun"],
     "S A Yadav": ["suryakumaryadav", "suryakumar", "sky", "skyyadav"],
@@ -686,6 +737,7 @@ def owner_detail_payload(owner, state):
         players.append(
             {
                 "player_name": player["player_name"],
+                "ipl_team": PLAYER_TEAMS.get(player["player_name"], "-"),
                 "points": totals["points"],
                 "runs": totals["runs"],
                 "wickets": totals["wickets"],
@@ -819,7 +871,7 @@ def public_state_payload():
         owner_total = 0
         for player in owner["players"]:
             owner_total += aggregate_player_totals(player, owner, state)["points"]
-        owners.append({"owner_name": owner["owner_name"], "total_points": round(owner_total, 2)})
+        owners.append({"owner_name": owner["owner_name"], "owner_slug": slugify(owner["owner_name"]), "total_points": round(owner_total, 2)})
     owners.sort(key=lambda item: (-item["total_points"], item["owner_name"]))
     return {
         "owners": owners,
@@ -1515,8 +1567,8 @@ LEADERBOARD_HTML = r"""<!DOCTYPE html>
           <div class="left">
             <div class="rank">#${index + 1}</div>
             <div>
-              <div class="name">${owner.owner_name}</div>
-              <div class="tiny">Captain: ${owner.captain} | VC: ${owner.vice_captain}</div>
+              <div class="name"><a href="/owner/${owner.owner_slug}" style="color:inherit;text-decoration:none;">${owner.owner_name}</a></div>
+              <div class="tiny">Tap owner name to view squad and player points</div>
             </div>
           </div>
           <div class="pts">${owner.total_points}</div>
@@ -1528,6 +1580,69 @@ LEADERBOARD_HTML = r"""<!DOCTYPE html>
     }
     refreshBoard();
     setInterval(refreshBoard, 15000);
+  </script>
+</body>
+</html>
+"""
+
+
+PUBLIC_OWNER_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Owner Squad</title>
+  <style>
+    body { margin:0; background:linear-gradient(160deg,#08131f,#10243a); color:#f6f7fb; font-family:"Segoe UI",sans-serif; padding:16px; }
+    .shell { width:min(860px,100%); margin:0 auto; }
+    .top { display:flex; gap:12px; align-items:center; margin-bottom:16px; flex-wrap:wrap; }
+    a.back { color:#08131f; text-decoration:none; background:#ffb703; padding:10px 14px; border-radius:14px; font-weight:700; }
+    h1 { margin:0; font-size:32px; }
+    .hero, .row { background:rgba(9,24,40,.84); border:1px solid rgba(255,255,255,.08); border-radius:18px; }
+    .hero { padding:18px; margin-bottom:16px; }
+    .row { display:flex; justify-content:space-between; gap:12px; padding:12px 14px; margin-bottom:10px; }
+    .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:11px; font-weight:700; margin-right:6px; background:#ffb703; color:#08131f; }
+    .badge.vc { background:#d1d5db; }
+    .badge.team { background:#34d399; }
+    .pts { color:#34d399; font-weight:800; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top">
+      <a class="back" href="/">Back</a>
+      <h1 id="ownerName">Owner</h1>
+    </div>
+    <div class="hero">
+      <div id="summary"></div>
+    </div>
+    <div id="players"></div>
+  </div>
+  <script>
+    async function loadOwner() {
+      const slug = location.pathname.split('/').pop();
+      const response = await fetch(`/api/owner/${slug}`);
+      if (response.status === 404) return document.body.innerHTML = '<div style="padding:20px;color:#fff;">Owner not found.</div>';
+      const owner = await response.json();
+      document.getElementById('ownerName').textContent = owner.owner_name;
+      document.getElementById('summary').innerHTML = `<div style="font-size:22px;font-weight:700;">${owner.total_points} pts</div><div style="color:#9cb3c9;margin-top:6px;">Captain: ${owner.captain} | Vice-captain: ${owner.vice_captain}</div>`;
+      document.getElementById('players').innerHTML = owner.players.map(player => `
+        <div class="row">
+          <div>
+            <div style="font-weight:700">${player.player_name}</div>
+            <div style="color:#9cb3c9;font-size:12px;margin-top:4px;">
+              <span class="badge team">${player.ipl_team}</span>
+              ${player.is_captain ? '<span class="badge">C</span>' : ''}
+              ${player.is_vice_captain ? '<span class="badge vc">VC</span>' : ''}
+              ${player.is_wicketkeeper ? '<span class="badge vc">WK</span>' : ''}
+            </div>
+            <div style="color:#9cb3c9;font-size:12px;margin-top:6px;">Runs ${player.runs} | Wkts ${player.wickets} | Catches ${player.catches} | Stumpings ${player.stumpings}</div>
+          </div>
+          <div class="pts">${player.points}</div>
+        </div>
+      `).join('');
+    }
+    loadOwner();
   </script>
 </body>
 </html>
@@ -2136,6 +2251,9 @@ class FantasyCricketHandler(BaseHTTPRequestHandler):
         if path == "/":
             self.html_response(LEADERBOARD_HTML)
             return
+        if path.startswith("/owner/"):
+            self.html_response(PUBLIC_OWNER_HTML)
+            return
         if path == "/admin/login":
             self.html_response(ADMIN_LOGIN_HTML.replace("{{ERROR}}", ""))
             return
@@ -2153,121 +2271,3 @@ class FantasyCricketHandler(BaseHTTPRequestHandler):
         if path == "/admin/players":
             if not self.require_admin():
                 return
-            self.html_response(ADMIN_PLAYERS_HTML)
-            return
-        if path == "/admin/analytics":
-            if not self.require_admin():
-                return
-            self.html_response(ADMIN_ANALYTICS_HTML)
-            return
-        if path.startswith("/admin/owner/"):
-            if not self.require_admin():
-                return
-            self.html_response(ADMIN_OWNER_HTML)
-            return
-        if path == "/api/state":
-            self.json_response(public_state_payload())
-            return
-        if path == "/api/admin/state":
-            if not self.require_admin():
-                return
-            self.json_response(leaderboard_state())
-            return
-        if path == "/api/admin/players":
-            if not self.require_admin():
-                return
-            state = maybe_refresh_state()
-            self.json_response(player_leaderboard_data(state))
-            return
-        if path == "/api/admin/analytics":
-            if not self.require_admin():
-                return
-            state = maybe_refresh_state()
-            self.json_response(analytics_payload(state))
-            return
-        if path.startswith("/api/admin/owner/"):
-            if not self.require_admin():
-                return
-            slug = path.split("/api/admin/owner/", 1)[1]
-            state = maybe_refresh_state()
-            owner = owner_slug_map(state).get(slug)
-            if not owner:
-                self.json_response({"error": "Owner not found."}, status=404)
-                return
-            self.json_response(owner_detail_payload(owner, state))
-            return
-        if path == "/api/admin/search":
-            if not self.require_admin():
-                return
-            state = maybe_refresh_state()
-            query = urllib.parse.parse_qs(urlparse(self.path).query).get("q", [""])[0]
-            self.json_response(search_results(state, query))
-            return
-        self.send_error(404, "Not Found")
-
-    def do_POST(self):
-        path = urlparse(self.path).path
-        try:
-            if path == "/admin/login":
-                payload = self.read_json()
-                if str(payload.get("password", "")) == ADMIN_PASSWORD:
-                    self.redirect_response(
-                        "/admin",
-                        headers={"Set-Cookie": f"{ADMIN_COOKIE_NAME}={ADMIN_COOKIE_VALUE}; Path=/; HttpOnly; SameSite=Lax"},
-                    )
-                else:
-                    self.html_response(ADMIN_LOGIN_HTML.replace("{{ERROR}}", "Wrong password."), status=401)
-                return
-
-            if path == "/api/refresh-now":
-                if not self.require_admin():
-                    return
-                maybe_refresh_state(force=True)
-                self.json_response(leaderboard_state())
-                return
-
-            if path == "/api/captain-change":
-                if not self.require_admin():
-                    return
-                payload = self.read_json()
-                state = load_state()
-                apply_captain_change(
-                    state=state,
-                    owner_name=str(payload.get("owner_name", "")),
-                    new_captain=str(payload.get("new_captain", "")),
-                    new_vice_captain=str(payload.get("new_vice_captain", "")),
-                    from_match_id=str(payload.get("from_match_id", "")),
-                )
-                self.json_response(leaderboard_state())
-                return
-
-        except ValueError as exc:
-            self.json_response({"error": str(exc)}, status=400)
-            return
-        except urllib.error.HTTPError as exc:
-            self.json_response({"error": f"Live data source returned HTTP {exc.code}."}, status=502)
-            return
-        except urllib.error.URLError:
-            self.json_response({"error": "Could not reach the live cricket source right now."}, status=502)
-            return
-        except Exception as exc:
-            self.json_response({"error": f"Unexpected error: {exc}"}, status=500)
-            return
-
-        self.send_error(404, "Not Found")
-
-    def log_message(self, format_string, *args):
-        return
-
-
-if __name__ == "__main__":
-    load_state()
-    server = ThreadingHTTPServer((HOST, PORT), FantasyCricketHandler)
-    print(f"Fantasy cricket app running at http://127.0.0.1:{PORT}")
-    print("Open the URL in your browser. Press Ctrl+C to stop.")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping server...")
-    finally:
-        server.server_close()
