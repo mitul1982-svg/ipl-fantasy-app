@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 import io
 import zipfile
+from http import cookies
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -20,6 +21,9 @@ API_BASE = "https://api.cricapi.com/v1"
 CRICBUZZ_LIVE_URL = "https://www.cricbuzz.com/cricket-match/live-scores"
 CRICBUZZ_RECENT_URL = "https://www.cricbuzz.com/cricket-match/live-scores/recent-matches"
 CRICSHEET_IPL_JSON_ZIP = "https://cricsheet.org/downloads/ipl_json.zip"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ipl2026")
+ADMIN_COOKIE_NAME = "ipl_admin_auth"
+ADMIN_COOKIE_VALUE = "ok"
 
 DEFAULT_SETTINGS = {
     "cricketdata_api_key": os.environ.get("CRICKETDATA_API_KEY", "").strip(),
@@ -590,6 +594,7 @@ def leaderboard_state():
         enriched_players.sort(key=lambda item: item["points"], reverse=True)
         owner_copy = {
             "owner_name": owner["owner_name"],
+            "owner_slug": slugify(owner["owner_name"]),
             "captain": owner["captain"],
             "vice_captain": owner["vice_captain"],
             "original_captain": owner.get("original_captain", owner["captain"]),
@@ -630,6 +635,198 @@ def ordered_match_catalog(state):
         )
     )
     return catalog
+
+
+def slugify(value):
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
+    return slug or "item"
+
+
+def owner_slug_map(state):
+    return {slugify(owner["owner_name"]): owner for owner in state["owners"]}
+
+
+def selection_percentage(player_name, state):
+    owner_count = len(state["owners"]) or 1
+    selected = 0
+    for owner in state["owners"]:
+        if any(player["player_name"] == player_name for player in owner["players"]):
+            selected += 1
+    return round((selected / owner_count) * 100, 2)
+
+
+def player_leaderboard_data(state):
+    players = []
+    for owner in state["owners"]:
+        for player in owner["players"]:
+            totals = aggregate_player_totals(player, owner, state)
+            players.append(
+                {
+                    "player_name": player["player_name"],
+                    "owner_name": owner["owner_name"],
+                    "owner_slug": slugify(owner["owner_name"]),
+                    "points": totals["points"],
+                    "runs": totals["runs"],
+                    "wickets": totals["wickets"],
+                    "catches": totals["catches"],
+                    "stumpings": totals["stumpings"],
+                    "selection_pct": selection_percentage(player["player_name"], state),
+                }
+            )
+    players.sort(key=lambda item: (-item["points"], item["player_name"]))
+    return players
+
+
+def owner_detail_payload(owner, state):
+    players = []
+    total = 0
+    for player in owner["players"]:
+        totals = aggregate_player_totals(player, owner, state)
+        total += totals["points"]
+        players.append(
+            {
+                "player_name": player["player_name"],
+                "points": totals["points"],
+                "runs": totals["runs"],
+                "wickets": totals["wickets"],
+                "catches": totals["catches"],
+                "stumpings": totals["stumpings"],
+                "is_captain": player["player_name"] == owner["captain"],
+                "is_vice_captain": player["player_name"] == owner["vice_captain"],
+                "is_wicketkeeper": player.get("is_wicketkeeper", False),
+            }
+        )
+    players.sort(key=lambda item: (-item["points"], item["player_name"]))
+    return {
+        "owner_name": owner["owner_name"],
+        "owner_slug": slugify(owner["owner_name"]),
+        "captain": owner["captain"],
+        "vice_captain": owner["vice_captain"],
+        "captain_change_used": owner.get("captain_change_used", False),
+        "captain_change_from_match_id": owner.get("captain_change_from_match_id", ""),
+        "changed_captain": owner.get("changed_captain", ""),
+        "changed_vice_captain": owner.get("changed_vice_captain", ""),
+        "total_points": round(total, 2),
+        "players": players,
+    }
+
+
+def search_results(state, query):
+    query = query.strip().lower()
+    if len(query) < 2:
+        return []
+    results = []
+    for row in player_leaderboard_data(state):
+        if query in row["player_name"].lower():
+            results.append(row)
+    return results[:12]
+
+
+def analytics_payload(state):
+    ordered_matches = ordered_match_catalog(state)
+    match_labels = []
+    for match in ordered_matches:
+        label = f"M{match.get('match_number')}" if match.get("match_number") else match.get("id")
+        match_labels.append(label)
+
+    owner_progression = []
+    for owner in state["owners"]:
+        running = 0
+        points_line = []
+        for match in ordered_matches:
+            match_points = 0
+            for player in owner["players"]:
+                stats = (player.get("matches") or {}).get(match["id"])
+                if not stats:
+                    continue
+                current_captain, current_vice = owner_assignment_for_match(owner, match["id"], state)
+                match_points += calculate_player_points(
+                    runs=int(stats.get("runs", 0)),
+                    wickets=int(stats.get("wickets", 0)),
+                    catches=int(stats.get("catches", 0)),
+                    stumpings=int(stats.get("stumpings", 0)),
+                    is_wicketkeeper=player.get("is_wicketkeeper", False),
+                    is_captain=player["player_name"] == current_captain,
+                    is_vice_captain=player["player_name"] == current_vice,
+                )
+            running += round(match_points, 2)
+            points_line.append(round(running, 2))
+        owner_progression.append({"name": owner["owner_name"], "points": points_line})
+
+    best_match_rows = []
+    consistent_rows = []
+    for owner in state["owners"]:
+        for player in owner["players"]:
+            consistent_count = 0
+            total_matches = 0
+            for match_id, stats in (player.get("matches") or {}).items():
+                current_captain, current_vice = owner_assignment_for_match(owner, match_id, state)
+                match_points = calculate_player_points(
+                    runs=int(stats.get("runs", 0)),
+                    wickets=int(stats.get("wickets", 0)),
+                    catches=int(stats.get("catches", 0)),
+                    stumpings=int(stats.get("stumpings", 0)),
+                    is_wicketkeeper=player.get("is_wicketkeeper", False),
+                    is_captain=player["player_name"] == current_captain,
+                    is_vice_captain=player["player_name"] == current_vice,
+                )
+                bare_points = calculate_player_points(
+                    runs=int(stats.get("runs", 0)),
+                    wickets=int(stats.get("wickets", 0)),
+                    catches=int(stats.get("catches", 0)),
+                    stumpings=int(stats.get("stumpings", 0)),
+                    is_wicketkeeper=player.get("is_wicketkeeper", False),
+                    is_captain=False,
+                    is_vice_captain=False,
+                )
+                best_match_rows.append(
+                    {
+                        "player_name": player["player_name"],
+                        "owner_name": owner["owner_name"],
+                        "match_code": match_id,
+                        "points": round(match_points, 2),
+                    }
+                )
+                total_matches += 1
+                if bare_points >= 25:
+                    consistent_count += 1
+            if total_matches:
+                consistent_rows.append(
+                    {
+                        "player_name": player["player_name"],
+                        "owner_name": owner["owner_name"],
+                        "consistent_matches": consistent_count,
+                        "total_matches": total_matches,
+                    }
+                )
+
+    best_match_rows.sort(key=lambda item: (-item["points"], item["player_name"]))
+    consistent_rows.sort(
+        key=lambda item: (-item["consistent_matches"], -item["total_matches"], item["player_name"])
+    )
+    return {
+        "match_labels": match_labels,
+        "owner_progression": owner_progression,
+        "best_match": best_match_rows[:20],
+        "consistent": consistent_rows[:20],
+    }
+
+
+def public_state_payload():
+    state = maybe_refresh_state()
+    owners = []
+    for owner in state["owners"]:
+        owner_total = 0
+        for player in owner["players"]:
+            owner_total += aggregate_player_totals(player, owner, state)["points"]
+        owners.append({"owner_name": owner["owner_name"], "total_points": round(owner_total, 2)})
+    owners.sort(key=lambda item: (-item["total_points"], item["owner_name"]))
+    return {
+        "owners": owners,
+        "live_matches": state.get("live_matches", []),
+        "last_sync_message": state.get("last_sync_message"),
+        "last_sync_at": state.get("last_sync_at"),
+    }
 
 
 def get_setting_api_key(state):
@@ -1337,6 +1534,232 @@ LEADERBOARD_HTML = r"""<!DOCTYPE html>
 """
 
 
+ADMIN_LOGIN_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Login</title>
+  <style>
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background:linear-gradient(160deg,#08131f,#10243a); color:#f6f7fb; font-family:"Segoe UI",sans-serif; }
+    .box { width:min(360px,calc(100% - 28px)); background:rgba(9,24,40,.9); border:1px solid rgba(255,255,255,.1); border-radius:22px; padding:26px; }
+    h1 { margin:0 0 10px; font-size:28px; }
+    p { color:#9cb3c9; line-height:1.5; }
+    input, button { width:100%; box-sizing:border-box; border-radius:14px; border:1px solid rgba(255,255,255,.12); padding:12px 14px; font-size:15px; }
+    input { background:#fff; color:#08131f; margin:14px 0 10px; }
+    button { background:linear-gradient(180deg, rgba(255,183,3,.24), rgba(255,183,3,.08)); color:#f6f7fb; cursor:pointer; }
+    .error { color:#fb7185; min-height:22px; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <form class="box" method="POST" action="/admin/login">
+    <h1>Admin Login</h1>
+    <p>Only the public leaderboard is open to everyone. Use this page for team controls, player views, and analytics.</p>
+    <input type="password" name="password" placeholder="Enter admin password" autofocus>
+    <button type="submit">Enter Admin</button>
+    <div class="error">{{ERROR}}</div>
+  </form>
+</body>
+</html>
+"""
+
+
+ADMIN_PLAYERS_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Player Leaderboard</title>
+  <style>
+    body { margin:0; background:linear-gradient(160deg,#08131f,#10243a); color:#f6f7fb; font-family:"Segoe UI",sans-serif; padding:16px; }
+    .shell { width:min(980px,100%); margin:0 auto; }
+    .top { display:flex; gap:12px; align-items:center; margin-bottom:16px; flex-wrap:wrap; }
+    a { color:#08131f; text-decoration:none; background:#ffb703; padding:10px 14px; border-radius:14px; font-weight:700; }
+    h1 { margin:0; font-size:32px; }
+    .sub { color:#9cb3c9; margin:6px 0 16px; }
+    .row { display:grid; grid-template-columns: 48px 1.3fr .9fr .7fr .7fr; gap:10px; align-items:center; padding:12px 14px; border-radius:16px; background:rgba(9,24,40,.84); border:1px solid rgba(255,255,255,.08); margin-bottom:10px; }
+    .head { color:#9cb3c9; text-transform:uppercase; font-size:12px; letter-spacing:.08em; }
+    .pts { color:#34d399; font-weight:800; }
+    @media (max-width:700px) { .row { grid-template-columns: 42px 1fr; } .head { display:none; } .hide-m { display:none; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top">
+      <a href="/admin">Back</a>
+      <h1>Player Leaderboard</h1>
+    </div>
+    <div class="sub">Top fantasy performers across all owners.</div>
+    <div class="row head"><div>#</div><div>Player</div><div class="hide-m">Owner</div><div class="hide-m">Selected</div><div>Points</div></div>
+    <div id="rows"></div>
+  </div>
+  <script>
+    async function loadPlayers() {
+      const response = await fetch('/api/admin/players');
+      if (response.status === 401) return location.href = '/admin/login';
+      const players = await response.json();
+      document.getElementById('rows').innerHTML = players.map((p, i) => `
+        <div class="row">
+          <div>${i + 1}</div>
+          <div><div style="font-weight:700">${p.player_name}</div><div style="color:#9cb3c9;font-size:12px;">Runs ${p.runs} | Wkts ${p.wickets}</div></div>
+          <div class="hide-m"><a href="/admin/owner/${p.owner_slug}" style="background:none;color:#f6f7fb;padding:0;">${p.owner_name}</a></div>
+          <div class="hide-m">${p.selection_pct}%</div>
+          <div class="pts">${p.points}</div>
+        </div>
+      `).join('');
+    }
+    loadPlayers();
+  </script>
+</body>
+</html>
+"""
+
+
+ADMIN_OWNER_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Owner Squad</title>
+  <style>
+    body { margin:0; background:linear-gradient(160deg,#08131f,#10243a); color:#f6f7fb; font-family:"Segoe UI",sans-serif; padding:16px; }
+    .shell { width:min(860px,100%); margin:0 auto; }
+    .top { display:flex; gap:12px; align-items:center; margin-bottom:16px; flex-wrap:wrap; }
+    a { color:#08131f; text-decoration:none; background:#ffb703; padding:10px 14px; border-radius:14px; font-weight:700; }
+    h1 { margin:0; font-size:32px; }
+    .hero, .row { background:rgba(9,24,40,.84); border:1px solid rgba(255,255,255,.08); border-radius:18px; }
+    .hero { padding:18px; margin-bottom:16px; }
+    .row { display:flex; justify-content:space-between; gap:12px; padding:12px 14px; margin-bottom:10px; }
+    .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:11px; font-weight:700; margin-right:6px; background:#ffb703; color:#08131f; }
+    .badge.vc { background:#d1d5db; }
+    .pts { color:#34d399; font-weight:800; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top">
+      <a href="/admin">Back</a>
+      <h1 id="ownerName">Owner</h1>
+    </div>
+    <div class="hero">
+      <div id="summary"></div>
+    </div>
+    <div id="players"></div>
+  </div>
+  <script>
+    async function loadOwner() {
+      const slug = location.pathname.split('/').pop();
+      const response = await fetch(`/api/admin/owner/${slug}`);
+      if (response.status === 401) return location.href = '/admin/login';
+      if (response.status === 404) return document.body.innerHTML = '<div style="padding:20px;color:#fff;">Owner not found.</div>';
+      const owner = await response.json();
+      document.getElementById('ownerName').textContent = owner.owner_name;
+      document.getElementById('summary').innerHTML = `<div style="font-size:22px;font-weight:700;">${owner.total_points} pts</div><div style="color:#9cb3c9;margin-top:6px;">Captain: ${owner.captain} | Vice-captain: ${owner.vice_captain}</div>`;
+      document.getElementById('players').innerHTML = owner.players.map(player => `
+        <div class="row">
+          <div>
+            <div style="font-weight:700">${player.player_name}</div>
+            <div style="color:#9cb3c9;font-size:12px;margin-top:4px;">
+              ${player.is_captain ? '<span class="badge">C</span>' : ''}
+              ${player.is_vice_captain ? '<span class="badge vc">VC</span>' : ''}
+              ${player.is_wicketkeeper ? '<span class="badge vc">WK</span>' : ''}
+              Runs ${player.runs} | Wkts ${player.wickets} | C ${player.catches} | St ${player.stumpings}
+            </div>
+          </div>
+          <div class="pts">${player.points}</div>
+        </div>
+      `).join('');
+    }
+    loadOwner();
+  </script>
+</body>
+</html>
+"""
+
+
+ADMIN_ANALYTICS_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Analytics</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+  <style>
+    body { margin:0; background:linear-gradient(160deg,#08131f,#10243a); color:#f6f7fb; font-family:"Segoe UI",sans-serif; padding:16px; }
+    .shell { width:min(1100px,100%); margin:0 auto; }
+    .top { display:flex; gap:12px; align-items:center; margin-bottom:16px; flex-wrap:wrap; }
+    a { color:#08131f; text-decoration:none; background:#ffb703; padding:10px 14px; border-radius:14px; font-weight:700; }
+    h1 { margin:0; font-size:32px; }
+    .panel { background:rgba(9,24,40,.84); border:1px solid rgba(255,255,255,.08); border-radius:18px; padding:16px; margin-bottom:16px; }
+    .table-row { display:grid; grid-template-columns: 52px 1.2fr 1fr .8fr .8fr; gap:10px; padding:10px 0; border-bottom:1px solid rgba(255,255,255,.06); }
+    .table-row:last-child { border-bottom:0; }
+    .head { color:#9cb3c9; text-transform:uppercase; font-size:12px; letter-spacing:.08em; }
+    @media (max-width:760px) { .table-row { grid-template-columns: 44px 1fr; } .hide-m { display:none; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top">
+      <a href="/admin">Back</a>
+      <h1>Analytics</h1>
+    </div>
+    <div class="panel">
+      <div style="font-size:20px;font-weight:700;margin-bottom:12px;">Owner Progression</div>
+      <canvas id="progressionChart" height="180"></canvas>
+    </div>
+    <div class="panel">
+      <div style="font-size:20px;font-weight:700;margin-bottom:10px;">Best Single-Match Scores</div>
+      <div class="table-row head"><div>#</div><div>Player</div><div class="hide-m">Owner</div><div class="hide-m">Match</div><div>Points</div></div>
+      <div id="bestMatch"></div>
+    </div>
+    <div class="panel">
+      <div style="font-size:20px;font-weight:700;margin-bottom:10px;">Most Consistent Players</div>
+      <div class="table-row head"><div>#</div><div>Player</div><div class="hide-m">Owner</div><div class="hide-m">25+ Matches</div><div>Total</div></div>
+      <div id="consistent"></div>
+    </div>
+  </div>
+  <script>
+    async function loadAnalytics() {
+      const response = await fetch('/api/admin/analytics');
+      if (response.status === 401) return location.href = '/admin/login';
+      const data = await response.json();
+      const colors = ['#00d4ff','#ff6384','#36a2eb','#ffce56','#4bc0c0','#9966ff','#ff9f40','#7cfc00','#ff4500','#da70d6','#34d399','#d1d5db'];
+      new Chart(document.getElementById('progressionChart'), {
+        type: 'line',
+        data: {
+          labels: data.match_labels,
+          datasets: data.owner_progression.map((owner, index) => ({
+            label: owner.name,
+            data: owner.points,
+            borderColor: colors[index % colors.length],
+            tension: 0.25,
+            pointRadius: 2,
+            borderWidth: 2
+          }))
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: '#f6f7fb' } } },
+          scales: {
+            x: { ticks: { color: '#9cb3c9' }, grid: { color: 'rgba(255,255,255,.08)' } },
+            y: { ticks: { color: '#9cb3c9' }, grid: { color: 'rgba(255,255,255,.08)' } }
+          }
+        }
+      });
+      document.getElementById('bestMatch').innerHTML = data.best_match.map((row, i) => `
+        <div class="table-row"><div>${i + 1}</div><div>${row.player_name}</div><div class="hide-m">${row.owner_name}</div><div class="hide-m">${row.match_code}</div><div>${row.points}</div></div>
+      `).join('');
+      document.getElementById('consistent').innerHTML = data.consistent.map((row, i) => `
+        <div class="table-row"><div>${i + 1}</div><div>${row.player_name}</div><div class="hide-m">${row.owner_name}</div><div class="hide-m">${row.consistent_matches}</div><div>${row.total_matches}</div></div>
+      `).join('');
+    }
+    loadAnalytics();
+  </script>
+</body>
+</html>
+"""
+
+
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1415,6 +1838,10 @@ HTML = r"""<!DOCTYPE html>
     .warning { color: #ffd166; font-size: 13px; line-height: 1.5; margin-top: 8px; }
     .change-box { margin: 14px 0 10px; padding: 12px; border-radius: 16px; background: rgba(255,255,255,0.05); }
     .change-grid { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 8px; }
+    .nav-links { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }
+    .nav-links a { color: var(--text); text-decoration:none; padding: 10px 14px; border-radius: 14px; background: rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.10); }
+    .search-results { margin-top:10px; display:grid; gap:8px; }
+    .search-item { border:1px solid rgba(255,255,255,0.06); border-radius:14px; background: rgba(255,255,255,0.04); padding:10px 12px; }
     select {
       border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; background: rgba(255,255,255,0.06);
       color: var(--text); padding: 10px 12px; font-size: 14px; width: 100%;
@@ -1428,6 +1855,12 @@ HTML = r"""<!DOCTYPE html>
       <h1>IPL 2026 Fantasy League</h1>
       <p>Admin view for the fantasy league. Public users should only use the main leaderboard page. This panel is only for checking tracked matches and using one-time captain and vice-captain changes.</p>
       <div class="status-bar" id="syncBadge">Waiting for first sync</div>
+      <div class="nav-links">
+        <a href="/admin/players">Player Leaderboard</a>
+        <a href="/admin/analytics">Analytics</a>
+        <a href="/" target="_blank" rel="noreferrer">Open Public Leaderboard</a>
+        <a href="/admin/logout">Logout</a>
+      </div>
     </section>
 
     <div class="grid">
@@ -1435,10 +1868,12 @@ HTML = r"""<!DOCTYPE html>
         <h2>Admin Tools</h2>
         <div class="sub">The app backfills old IPL 2026 matches automatically from Cricsheet and refreshes live scorecards automatically from Cricbuzz. Use this page only when you want to force a refresh or apply one-time captain changes.</div>
         <div class="toolbar">
+          <input id="playerSearch" placeholder="Search player..." oninput="searchPlayers()">
           <button onclick="forceRefresh()">Force Refresh Now</button>
           <button class="ghost" onclick="refreshState()">Refresh Screen</button>
         </div>
         <div class="warning">No API key is needed. Automatic updates run in the background whenever people open the site, and the public leaderboard refreshes itself every 15 seconds.</div>
+        <div id="searchResults" class="search-results"></div>
         <div id="message" class="message"></div>
       </section>
 
@@ -1521,6 +1956,7 @@ HTML = r"""<!DOCTYPE html>
           <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
             <div>
               <div style="font-size:20px;font-weight:700;">${owner.owner_name}</div>
+              <div class="small"><a href="/admin/owner/${owner.owner_slug}" style="color:#ffb703;text-decoration:none;">Open owner page</a></div>
               <div class="small">Captain: ${owner.captain}</div>
               <div class="small">Vice-captain: ${owner.vice_captain}</div>
               <div class="small">${owner.captain_change_used ? `One-time change used from ${matchName(owner.captain_change_from_match_id)}` : "One-time captain/VC change available"}</div>
@@ -1587,12 +2023,31 @@ HTML = r"""<!DOCTYPE html>
       renderMeta();
     }
     async function refreshState() {
-      const response = await fetch("/api/state");
+      const response = await fetch("/api/admin/state");
+      if (response.status === 401) return location.href = "/admin/login";
       await draw(await response.json());
+    }
+    async function searchPlayers() {
+      const query = document.getElementById("playerSearch").value.trim();
+      const box = document.getElementById("searchResults");
+      if (query.length < 2) {
+        box.innerHTML = "";
+        return;
+      }
+      const response = await fetch(`/api/admin/search?q=${encodeURIComponent(query)}`);
+      if (response.status === 401) return location.href = "/admin/login";
+      const results = await response.json();
+      box.innerHTML = results.length ? results.map(player => `
+        <div class="search-item">
+          <div style="font-weight:700;">${player.player_name}</div>
+          <div class="small">Owner: <a href="/admin/owner/${player.owner_slug}" style="color:#ffb703;text-decoration:none;">${player.owner_name}</a> | Points: ${player.points} | Selection: ${player.selection_pct}%</div>
+        </div>
+      `).join("") : `<div class="small">No player found.</div>`;
     }
     async function forceRefresh() {
       setMessage("Refreshing historical and live data...");
       const response = await fetch("/api/refresh-now", { method: "POST" });
+      if (response.status === 401) return location.href = "/admin/login";
       const payload = await response.json();
       if (payload.error) return setMessage(payload.error, true);
       await draw(payload);
@@ -1608,6 +2063,7 @@ HTML = r"""<!DOCTYPE html>
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ owner_name: ownerName, new_captain: captain, new_vice_captain: vice, from_match_id: fromMatchId })
       });
+      if (response.status === 401) return location.href = "/admin/login";
       const payload = await response.json();
       if (payload.error) return setMessage(payload.error, true);
       await draw(payload);
@@ -1622,49 +2078,157 @@ HTML = r"""<!DOCTYPE html>
 
 
 class FantasyCricketHandler(BaseHTTPRequestHandler):
-    def json_response(self, payload, status=200):
+    def json_response(self, payload, status=200, headers=None):
         encoded = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(encoded)
 
-    def html_response(self, payload):
+    def html_response(self, payload, status=200, headers=None):
         encoded = payload.encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(encoded)
+
+    def redirect_response(self, location, headers=None):
+        self.send_response(302)
+        self.send_header("Location", location)
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
 
     def read_json(self):
         content_length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(content_length) if content_length else b"{}"
-        return json.loads(body.decode("utf-8"))
+        content_type = self.headers.get("Content-Type", "")
+        decoded = body.decode("utf-8")
+        if "application/json" in content_type:
+            return json.loads(decoded or "{}")
+        return {key: values[0] for key, values in urllib.parse.parse_qs(decoded).items()}
+
+    def is_admin_authenticated(self):
+        raw = self.headers.get("Cookie", "")
+        if not raw:
+            return False
+        jar = cookies.SimpleCookie()
+        jar.load(raw)
+        return jar.get(ADMIN_COOKIE_NAME) is not None and jar[ADMIN_COOKIE_NAME].value == ADMIN_COOKIE_VALUE
+
+    def require_admin(self):
+        if self.is_admin_authenticated():
+            return True
+        if self.path.startswith("/api/"):
+            self.json_response({"error": "Authentication required."}, status=401)
+        else:
+            self.redirect_response("/admin/login")
+        return False
 
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
             self.html_response(LEADERBOARD_HTML)
             return
+        if path == "/admin/login":
+            self.html_response(ADMIN_LOGIN_HTML.replace("{{ERROR}}", ""))
+            return
+        if path == "/admin/logout":
+            self.redirect_response(
+                "/admin/login",
+                headers={"Set-Cookie": f"{ADMIN_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"},
+            )
+            return
         if path == "/admin":
+            if not self.require_admin():
+                return
             self.html_response(HTML)
             return
+        if path == "/admin/players":
+            if not self.require_admin():
+                return
+            self.html_response(ADMIN_PLAYERS_HTML)
+            return
+        if path == "/admin/analytics":
+            if not self.require_admin():
+                return
+            self.html_response(ADMIN_ANALYTICS_HTML)
+            return
+        if path.startswith("/admin/owner/"):
+            if not self.require_admin():
+                return
+            self.html_response(ADMIN_OWNER_HTML)
+            return
         if path == "/api/state":
+            self.json_response(public_state_payload())
+            return
+        if path == "/api/admin/state":
+            if not self.require_admin():
+                return
             self.json_response(leaderboard_state())
+            return
+        if path == "/api/admin/players":
+            if not self.require_admin():
+                return
+            state = maybe_refresh_state()
+            self.json_response(player_leaderboard_data(state))
+            return
+        if path == "/api/admin/analytics":
+            if not self.require_admin():
+                return
+            state = maybe_refresh_state()
+            self.json_response(analytics_payload(state))
+            return
+        if path.startswith("/api/admin/owner/"):
+            if not self.require_admin():
+                return
+            slug = path.split("/api/admin/owner/", 1)[1]
+            state = maybe_refresh_state()
+            owner = owner_slug_map(state).get(slug)
+            if not owner:
+                self.json_response({"error": "Owner not found."}, status=404)
+                return
+            self.json_response(owner_detail_payload(owner, state))
+            return
+        if path == "/api/admin/search":
+            if not self.require_admin():
+                return
+            state = maybe_refresh_state()
+            query = urllib.parse.parse_qs(urlparse(self.path).query).get("q", [""])[0]
+            self.json_response(search_results(state, query))
             return
         self.send_error(404, "Not Found")
 
     def do_POST(self):
         path = urlparse(self.path).path
         try:
+            if path == "/admin/login":
+                payload = self.read_json()
+                if str(payload.get("password", "")) == ADMIN_PASSWORD:
+                    self.redirect_response(
+                        "/admin",
+                        headers={"Set-Cookie": f"{ADMIN_COOKIE_NAME}={ADMIN_COOKIE_VALUE}; Path=/; HttpOnly; SameSite=Lax"},
+                    )
+                else:
+                    self.html_response(ADMIN_LOGIN_HTML.replace("{{ERROR}}", "Wrong password."), status=401)
+                return
+
             if path == "/api/refresh-now":
+                if not self.require_admin():
+                    return
                 maybe_refresh_state(force=True)
                 self.json_response(leaderboard_state())
                 return
 
             if path == "/api/captain-change":
+                if not self.require_admin():
+                    return
                 payload = self.read_json()
                 state = load_state()
                 apply_captain_change(
