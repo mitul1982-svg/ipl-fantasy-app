@@ -145,6 +145,102 @@ ALIAS_SIGNATURES = {
     "M J Henry": ["matthenry", "matthewhenry"],
 }
 
+PLAYER_ALIASES = {
+    "Virat Kohli": "V Kohli",
+    "Rohit Sharma": "R G Sharma",
+    "Jasprit Bumrah": "J J Bumrah",
+    "Hardik Pandya": "H H Pandya",
+    "Trent Boult": "T A Boult",
+    "Suryakumar Yadav": "S A Yadav",
+    "Ryan Rickelton": "R D Rickelton",
+    "Sunil Narine": "S P Narine",
+    "Varun Chakravarthy": "C V Varun",
+    "Travis Head": "T M Head",
+    "TM Head": "T M Head",
+    "Shardul Thakur": "S N Thakur",
+    "Nitish Reddy": "N K Reddy",
+    "Nithish Kumar Reddy": "N K Reddy",
+    "Heinrich Klaasen": "H Klaasen",
+    "Harshal Patel": "H V Patel",
+    "Jitesh Sharma": "J M Sharma",
+    "Mayank Markande": "M Markande",
+    "Phil Salt": "P D Salt",
+    "Finn Allen": "F H Allen",
+    "Cameron Green": "C Green",
+    "Blessing Muzarabani": "B Muzarabani",
+    "Jaydev Unadkat": "J D Unadkat",
+    "Devdutt Padikkal": "D Padikkal",
+    "Devdutt  Padikkal": "D Padikkal",
+    "Tim David": "T H David",
+    "Aniket Verma": "A Verma",
+    "Vaibhav Arora": "V G Arora",
+    "Ajinkya Rahane": "A M Rahane",
+    "Sanju Samson": "S V Samson",
+    "Ruturaj Gaikwad": "R D Gaikwad",
+    "Yashasvi Jaiswal": "Y B K Jaiswal",
+    "YBK Jaiswal": "Y B K Jaiswal",
+    "Vaibhav Suryavanshi": "V Suryavanshi",
+    "Dhruv Jurel": "D C Jurel",
+    "Riyan Parag": "R Parag",
+    "Riyan  Parag": "R Parag",
+    "Jofra Archer": "J C Archer",
+    "JC Archer": "J C Archer",
+    "Nandre Burger": "N Burger",
+    "Ravindra Jadeja": "R A Jadeja",
+    "RA Jadeja": "R A Jadeja",
+    "Khaleel Ahmed": "K K Ahmed",
+    "Matt Henry": "M J Henry",
+    "Jamie Overton": "J Overton",
+    "Rajat Patidar": "R M Patidar",
+    "Shivam Dube": "S Dube",
+    "Sarfaraz Khan": "S N Khan",
+    "Jos Buttler": "J C Buttler",
+    "Glenn Phillips": "G D Phillips",
+    "Rahul Tewatia": "R Tewatia",
+    "Marco Jansen": "M Jansen",
+    "Yuzvendra Chahal": "Y S Chahal",
+    "Shreyas Iyer": "S S Iyer",
+    "Nehal Wadhera": "N Wadhera",
+    "Marcus Stoinis": "M P Stoinis",
+    "Kagiso Rabada": "K Rabada",
+    "Prasidh Krishna": "M Prasidh Krishna",
+    "Mitchell Marsh": "M R Marsh",
+    "Rishabh Pant": "R R Pant",
+    "Aiden Markram": "A K Markram",
+    "Ayush Badoni": "A Badoni",
+    "KL Rahul": "K L Rahul",
+    "Nicholas Pooran": "N Pooran",
+    "Shahbaz Ahmed": "Shahbaz Ahamad",
+    "Axar Patel": "A R Patel",
+    "Thangarasu Natarajan": "T Natarajan",
+    "Vipraj Nigam": "V Nigam",
+    "Pathum Nissanka": "P Nissanka",
+    "Nitish Rana": "N Rana",
+    "Tristan Stubbs": "T Stubbs",
+    "Sherfane Rutherford": "S E Rutherford",
+    "Mitchell Santner": "M J Santner",
+    "Corbin Bosch": "C Bosch",
+    "David Miller": "D A Miller",
+    "Deepak Chahar": "D L Chahar",
+    "Shimron Hetmeyer": "S O Hetmeyer",
+    "Tushar Deshpande": "T U Deshpande",
+    "TU Deshpande": "T U Deshpande",
+    "Liam Livingstone": "L S Livingstone",
+    "Rahul Chahar": "R D Chahar",
+    "Venkatesh Iyer": "V R Iyer",
+    "Romario Shepherd": "R Shepherd",
+    "Krunal Pandya": "K H Pandya",
+    "Bhuvneshwar Kumar": "B Kumar",
+    "Dewald Brevis": "D Brevis",
+    "Akeal Hosein": "A J Hosein",
+    "Abhishek Sharma": "Abhishek Sharma",
+    "Ishan Kishan": "Ishan Kishan",
+    "Shivang Kumar": "Shivang Kumar",
+    "Ravi Bishnoi": "Ravi Bishnoi",
+    "Sandeep Sharma": "Sandeep Sharma",
+    "Sakib Hussain": "Sakib Hussain",
+}
+
 HOWSTAT_POINT_RULES = {
     "batting": "1 run = 1 point, plus +25 at 50, +35 at 75, +50 at 100",
     "bowling": "1 wicket = 25 points, plus +25 at 3 wickets, +35 at 4 wickets, +50 at 5 wickets",
@@ -561,12 +657,51 @@ def get_signature_lookup(state):
 
 
 def resolve_player_name(external_name, state):
+    alias_direct = PLAYER_ALIASES.get(str(external_name).strip())
+    if alias_direct:
+        return alias_direct
+
+    exact_normalized = normalize_text(external_name)
+    for owner in state["owners"]:
+        for player in owner["players"]:
+            if normalize_text(player["player_name"]) == exact_normalized:
+                return player["player_name"]
+
     lookup = get_signature_lookup(state)
     candidates = set()
     for signature in signatures_for_name(external_name):
         candidates.update(lookup.get(signature, set()))
     if len(candidates) == 1:
         return next(iter(candidates))
+    if len(candidates) > 1:
+        external_tokens = tokenize_name(external_name)
+        exact_full = [
+            candidate
+            for candidate in candidates
+            if tokenize_name(candidate) == external_tokens
+        ]
+        if len(exact_full) == 1:
+            return exact_full[0]
+
+        if external_tokens:
+            same_last = [
+                candidate
+                for candidate in candidates
+                if tokenize_name(candidate)
+                and tokenize_name(candidate)[-1] == external_tokens[-1]
+            ]
+            if len(same_last) == 1:
+                return same_last[0]
+
+            same_first_token = [
+                candidate
+                for candidate in same_last
+                if tokenize_name(candidate)[0] == external_tokens[0]
+            ]
+            if len(same_first_token) == 1:
+                return same_first_token[0]
+
+        return None
 
     external_tokens = tokenize_name(external_name)
     if not external_tokens:
@@ -574,6 +709,13 @@ def resolve_player_name(external_name, state):
     external_last = external_tokens[-1]
     external_first_initial = external_tokens[0][0]
 
+    for owner in state["owners"]:
+        for player in owner["players"]:
+            player_tokens = tokenize_name(player["player_name"])
+            if not player_tokens:
+                continue
+            if player_tokens[-1] == external_last and player_tokens[0] == external_tokens[0]:
+                return player["player_name"]
     for owner in state["owners"]:
         for player in owner["players"]:
             player_tokens = tokenize_name(player["player_name"])
@@ -1354,6 +1496,17 @@ def apply_match_stats(state, match_key, match_name, match_number, match_date, st
     return mapped_count
 
 
+def clear_all_match_stats(state):
+    for owner in state["owners"]:
+        for player in owner["players"]:
+            player["matches"] = {}
+    state["live_matches"] = []
+    state["match_catalog"] = {}
+    state["historical_backfill_at"] = None
+    state["last_live_sync_at"] = None
+    state["last_sync_at"] = None
+
+
 def backfill_from_cricsheet(state):
     raw = fetch_bytes(CRICSHEET_IPL_JSON_ZIP)
     archive = zipfile.ZipFile(io.BytesIO(raw))
@@ -1421,6 +1574,9 @@ def refresh_live_from_cricbuzz(state):
 def maybe_refresh_state(force=False):
     state = load_state()
     now = dt.datetime.now()
+    if force or state.get("mapping_version") != 2:
+        clear_all_match_stats(state)
+        state["mapping_version"] = 2
     hist_due = force or not state.get("historical_backfill_at")
     live_due = force or not state.get("last_live_sync_at")
     if not hist_due and state.get("historical_backfill_at"):
@@ -2271,3 +2427,130 @@ class FantasyCricketHandler(BaseHTTPRequestHandler):
         if path == "/admin/players":
             if not self.require_admin():
                 return
+            self.html_response(ADMIN_PLAYERS_HTML)
+            return
+        if path == "/admin/analytics":
+            if not self.require_admin():
+                return
+            self.html_response(ADMIN_ANALYTICS_HTML)
+            return
+        if path.startswith("/admin/owner/"):
+            if not self.require_admin():
+                return
+            self.html_response(ADMIN_OWNER_HTML)
+            return
+        if path == "/api/state":
+            self.json_response(public_state_payload())
+            return
+        if path.startswith("/api/owner/"):
+            slug = path.split("/api/owner/", 1)[1]
+            state = maybe_refresh_state()
+            owner = owner_slug_map(state).get(slug)
+            if not owner:
+                self.json_response({"error": "Owner not found."}, status=404)
+                return
+            self.json_response(owner_detail_payload(owner, state))
+            return
+        if path == "/api/admin/state":
+            if not self.require_admin():
+                return
+            self.json_response(leaderboard_state())
+            return
+        if path == "/api/admin/players":
+            if not self.require_admin():
+                return
+            state = maybe_refresh_state()
+            self.json_response(player_leaderboard_data(state))
+            return
+        if path == "/api/admin/analytics":
+            if not self.require_admin():
+                return
+            state = maybe_refresh_state()
+            self.json_response(analytics_payload(state))
+            return
+        if path.startswith("/api/admin/owner/"):
+            if not self.require_admin():
+                return
+            slug = path.split("/api/admin/owner/", 1)[1]
+            state = maybe_refresh_state()
+            owner = owner_slug_map(state).get(slug)
+            if not owner:
+                self.json_response({"error": "Owner not found."}, status=404)
+                return
+            self.json_response(owner_detail_payload(owner, state))
+            return
+        if path == "/api/admin/search":
+            if not self.require_admin():
+                return
+            state = maybe_refresh_state()
+            query = urllib.parse.parse_qs(urlparse(self.path).query).get("q", [""])[0]
+            self.json_response(search_results(state, query))
+            return
+        self.send_error(404, "Not Found")
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        try:
+            if path == "/admin/login":
+                payload = self.read_json()
+                if str(payload.get("password", "")) == ADMIN_PASSWORD:
+                    self.redirect_response(
+                        "/admin",
+                        headers={"Set-Cookie": f"{ADMIN_COOKIE_NAME}={ADMIN_COOKIE_VALUE}; Path=/; HttpOnly; SameSite=Lax"},
+                    )
+                else:
+                    self.html_response(ADMIN_LOGIN_HTML.replace("{{ERROR}}", "Wrong password."), status=401)
+                return
+
+            if path == "/api/refresh-now":
+                if not self.require_admin():
+                    return
+                maybe_refresh_state(force=True)
+                self.json_response(leaderboard_state())
+                return
+
+            if path == "/api/captain-change":
+                if not self.require_admin():
+                    return
+                payload = self.read_json()
+                state = load_state()
+                apply_captain_change(
+                    state=state,
+                    owner_name=str(payload.get("owner_name", "")),
+                    new_captain=str(payload.get("new_captain", "")),
+                    new_vice_captain=str(payload.get("new_vice_captain", "")),
+                    from_match_id=str(payload.get("from_match_id", "")),
+                )
+                self.json_response(leaderboard_state())
+                return
+
+        except ValueError as exc:
+            self.json_response({"error": str(exc)}, status=400)
+            return
+        except urllib.error.HTTPError as exc:
+            self.json_response({"error": f"Live data source returned HTTP {exc.code}."}, status=502)
+            return
+        except urllib.error.URLError:
+            self.json_response({"error": "Could not reach the live cricket source right now."}, status=502)
+            return
+        except Exception as exc:
+            self.json_response({"error": f"Unexpected error: {exc}"}, status=500)
+            return
+
+        self.send_error(404, "Not Found")
+
+    def log_message(self, format_string, *args):
+        return
+
+
+if __name__ == "__main__":
+    load_state()
+    server = ThreadingHTTPServer((HOST, PORT), FantasyCricketHandler)
+    print(f"Fantasy cricket app running at http://127.0.0.1:{PORT}")
+    print("Open the URL in your browser. Press Ctrl+C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping server...")
+    finally:
+        server.server_close()
