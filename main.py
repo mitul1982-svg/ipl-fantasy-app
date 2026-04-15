@@ -875,6 +875,61 @@ def owner_detail_payload(owner, state):
     total = 0
     for player in owner["players"]:
         totals = aggregate_player_totals(player, owner, state)
+        fifty_plus_count = 0
+        seventy_five_plus_count = 0
+        hundred_plus_count = 0
+        three_wickets_plus_count = 0
+        four_wickets_plus_count = 0
+        five_wickets_plus_count = 0
+        batting_points_total = 0
+        bowling_points_total = 0
+        fielding_points_total = 0
+        final_points_total = 0
+
+        for stats in (player.get("matches") or {}).values():
+            runs = int(stats.get("runs", 0))
+            wickets = int(stats.get("wickets", 0))
+            catches = int(stats.get("catches", 0))
+            stumpings = int(stats.get("stumpings", 0))
+            if runs >= 50:
+                fifty_plus_count += 1
+            if runs >= 75:
+                seventy_five_plus_count += 1
+            if runs >= 100:
+                hundred_plus_count += 1
+            if wickets >= 3:
+                three_wickets_plus_count += 1
+            if wickets >= 4:
+                four_wickets_plus_count += 1
+            if wickets >= 5:
+                five_wickets_plus_count += 1
+            batting_points_total += calculate_batting_points(runs)
+            bowling_points_total += calculate_bowling_points(wickets)
+            fielding_points_total += calculate_fielding_points(
+                catches=catches,
+                stumpings=stumpings,
+                is_wicketkeeper=player.get("is_wicketkeeper", False),
+            )
+
+        for match_id, stats in (player.get("matches") or {}).items():
+            runs = int(stats.get("runs", 0))
+            wickets = int(stats.get("wickets", 0))
+            catches = int(stats.get("catches", 0))
+            stumpings = int(stats.get("stumpings", 0))
+            match_captain, match_vice = owner_assignment_for_match(owner, match_id, state)
+            final_points_total += calculate_player_points(
+                runs=runs,
+                wickets=wickets,
+                catches=catches,
+                stumpings=stumpings,
+                is_wicketkeeper=player.get("is_wicketkeeper", False),
+                is_captain=player["player_name"] == match_captain,
+                is_vice_captain=player["player_name"] == match_vice,
+            )
+
+        base_points_total = round(batting_points_total + bowling_points_total + fielding_points_total, 2)
+        captain_vice_bonus_points = round(final_points_total - base_points_total, 2)
+
         total += totals["points"]
         players.append(
             {
@@ -885,6 +940,18 @@ def owner_detail_payload(owner, state):
                 "wickets": totals["wickets"],
                 "catches": totals["catches"],
                 "stumpings": totals["stumpings"],
+                "fifty_plus_count": fifty_plus_count,
+                "seventy_five_plus_count": seventy_five_plus_count,
+                "hundred_plus_count": hundred_plus_count,
+                "three_wickets_plus_count": three_wickets_plus_count,
+                "four_wickets_plus_count": four_wickets_plus_count,
+                "five_wickets_plus_count": five_wickets_plus_count,
+                "batting_points_total": round(batting_points_total, 2),
+                "bowling_points_total": round(bowling_points_total, 2),
+                "fielding_points_total": round(fielding_points_total, 2),
+                "base_points_total": base_points_total,
+                "captain_vice_bonus_points": captain_vice_bonus_points,
+                "final_points_total": round(final_points_total, 2),
                 "is_captain": player["player_name"] == owner["captain"],
                 "is_vice_captain": player["player_name"] == owner["vice_captain"],
                 "is_wicketkeeper": player.get("is_wicketkeeper", False),
@@ -1792,7 +1859,10 @@ PUBLIC_OWNER_HTML = r"""<!DOCTYPE html>
               ${player.is_vice_captain ? '<span class="badge vc">VC</span>' : ''}
               ${player.is_wicketkeeper ? '<span class="badge vc">WK</span>' : ''}
             </div>
-            <div style="color:#9cb3c9;font-size:12px;margin-top:6px;">Runs ${player.runs} | Wkts ${player.wickets} | Catches ${player.catches} | Stumpings ${player.stumpings}</div>
+            <div style="color:#9cb3c9;font-size:12px;margin-top:6px;">Runs ${player.runs} | 50+ ${player.fifty_plus_count} | 75+ ${player.seventy_five_plus_count} | 100+ ${player.hundred_plus_count}</div>
+            <div style="color:#9cb3c9;font-size:12px;margin-top:4px;">Wkts ${player.wickets} | 3+W ${player.three_wickets_plus_count} | 4+W ${player.four_wickets_plus_count} | 5+W ${player.five_wickets_plus_count}</div>
+            <div style="color:#9cb3c9;font-size:12px;margin-top:4px;">Catches ${player.catches} | Stumpings ${player.stumpings}</div>
+            <div style="color:#9cb3c9;font-size:12px;margin-top:4px;">Points: Bat ${player.batting_points_total} + Bowl ${player.bowling_points_total} + Field ${player.fielding_points_total} + C/VC ${player.captain_vice_bonus_points} = ${player.final_points_total}</div>
           </div>
           <div class="pts">${player.points}</div>
         </div>
@@ -1934,7 +2004,10 @@ ADMIN_OWNER_HTML = r"""<!DOCTYPE html>
               ${player.is_captain ? '<span class="badge">C</span>' : ''}
               ${player.is_vice_captain ? '<span class="badge vc">VC</span>' : ''}
               ${player.is_wicketkeeper ? '<span class="badge vc">WK</span>' : ''}
-              Runs ${player.runs} | Wkts ${player.wickets} | C ${player.catches} | St ${player.stumpings}
+              Runs ${player.runs} | 50+ ${player.fifty_plus_count} | 75+ ${player.seventy_five_plus_count} | 100+ ${player.hundred_plus_count}<br>
+              Wkts ${player.wickets} | 3+W ${player.three_wickets_plus_count} | 4+W ${player.four_wickets_plus_count} | 5+W ${player.five_wickets_plus_count}<br>
+              C ${player.catches} | St ${player.stumpings}<br>
+              Points: Bat ${player.batting_points_total} + Bowl ${player.bowling_points_total} + Field ${player.fielding_points_total} + C/VC ${player.captain_vice_bonus_points} = ${player.final_points_total}
             </div>
           </div>
           <div class="pts">${player.points}</div>
