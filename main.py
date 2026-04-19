@@ -157,6 +157,13 @@ PLAYER_ALIASES = {
     "Varun Chakravarthy": "C V Varun",
     "Travis Head": "T M Head",
     "TM Head": "T M Head",
+    "Quinton de Kock": "Q de Kock",
+    "Quinton deKock": "Q de Kock",
+    "Quinton de kock": "Q de Kock",
+    "Quinton deKock": "Q de Kock",
+    "Quinton de Kock ": "Q de Kock",
+    "Quinton Dde Kock": "Q de Kock",
+    "Quinton D De Kock": "Q de Kock",
     "Shardul Thakur": "S N Thakur",
     "Nitish Reddy": "N K Reddy",
     "Nithish Kumar Reddy": "N K Reddy",
@@ -190,6 +197,9 @@ PLAYER_ALIASES = {
     "RA Jadeja": "R A Jadeja",
     "Khaleel Ahmed": "K K Ahmed",
     "Matt Henry": "M J Henry",
+    "Josh Hazlewood": "J R Hazlewood",
+    "Josh Hazlewoood": "J R Hazlewood",
+    "J Hazlewood": "J R Hazlewood",
     "Jamie Overton": "J Overton",
     "Rajat Patidar": "R M Patidar",
     "Shivam Dube": "S Dube",
@@ -483,6 +493,21 @@ def normalize_text(value):
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
+def alias_lookup_key(value):
+    return normalize_text(str(value or ""))
+
+
+def resolve_alias_name(external_name):
+    key = alias_lookup_key(external_name)
+    if not key:
+        return None
+    # Build a normalized alias index on demand to tolerate case, punctuation and spacing differences.
+    for alias, canonical in PLAYER_ALIASES.items():
+        if alias_lookup_key(alias) == key:
+            return canonical
+    return None
+
+
 def tokenize_name(value):
     cleaned = re.sub(r"[^A-Za-z ]", " ", value)
     tokens = [token.lower() for token in cleaned.split() if token]
@@ -657,7 +682,7 @@ def get_signature_lookup(state):
 
 
 def resolve_player_name(external_name, state):
-    alias_direct = PLAYER_ALIASES.get(str(external_name).strip())
+    alias_direct = resolve_alias_name(external_name) or PLAYER_ALIASES.get(str(external_name).strip())
     if alias_direct:
         return alias_direct
 
@@ -760,12 +785,14 @@ def aggregate_player_totals(player, owner, state):
         totals["catches"] += int(stats.get("catches", 0))
         totals["stumpings"] += int(stats.get("stumpings", 0))
         match_captain, match_vice = owner_assignment_for_match(owner, match_id, state)
+        # Keeper eligibility is match-specific and sourced from scorecard evidence.
+        is_keeper_in_match = bool(stats.get("is_keeper_in_match", False))
         total_points += calculate_player_points(
             runs=int(stats.get("runs", 0)),
             wickets=int(stats.get("wickets", 0)),
             catches=int(stats.get("catches", 0)),
             stumpings=int(stats.get("stumpings", 0)),
-            is_wicketkeeper=player.get("is_wicketkeeper", False),
+            is_wicketkeeper=is_keeper_in_match,
             is_captain=player.get("player_name") == match_captain,
             is_vice_captain=player.get("player_name") == match_vice,
         )
@@ -891,6 +918,7 @@ def owner_detail_payload(owner, state):
             wickets = int(stats.get("wickets", 0))
             catches = int(stats.get("catches", 0))
             stumpings = int(stats.get("stumpings", 0))
+            is_keeper_in_match = bool(stats.get("is_keeper_in_match", False))
             if runs >= 50:
                 fifty_plus_count += 1
             if runs >= 75:
@@ -908,7 +936,7 @@ def owner_detail_payload(owner, state):
             fielding_points_total += calculate_fielding_points(
                 catches=catches,
                 stumpings=stumpings,
-                is_wicketkeeper=player.get("is_wicketkeeper", False),
+                is_wicketkeeper=is_keeper_in_match,
             )
 
         for match_id, stats in (player.get("matches") or {}).items():
@@ -1452,14 +1480,35 @@ def derive_player_stats_from_scorecards(scorecards):
     return stats_by_player
 
 
+def derive_match_keepers_from_scorecards(scorecards):
+    keepers = set()
+    for innings in scorecards or []:
+        batters = ((innings.get("batTeamDetails") or {}).get("batsmenData") or {}).values()
+        for batter in batters:
+            if batter.get("isKeeper"):
+                name = extract_text(batter.get("batName") or batter.get("batShortName"))
+                if name:
+                    keepers.add(name)
+    return keepers
+
+
 def discover_cricbuzz_ipl_matches():
     discovered = {}
-    for url in [CRICBUZZ_LIVE_URL, CRICBUZZ_RECENT_URL]:
+    for url in [CRICBUZZ_LIVE_URL]:
         html = fetch_text(url)
         for match_id, slug in re.findall(r"/live-cricket-scores/(\d+)/([^\"\\'\s<]+)", html):
             if "indian-premier-league-2026" not in slug and "ipl-2026" not in slug:
                 continue
             discovered[match_id] = slug
+    if discovered:
+        return discovered
+
+    # Fallback only when live list is unavailable.
+    html = fetch_text(CRICBUZZ_RECENT_URL)
+    for match_id, slug in re.findall(r"/live-cricket-scores/(\d+)/([^\"\\'\s<]+)", html):
+        if "indian-premier-league-2026" not in slug and "ipl-2026" not in slug:
+            continue
+        discovered[match_id] = slug
     return discovered
 
 
@@ -1479,6 +1528,7 @@ def scrape_cricbuzz_match(match_id, slug):
     if team1 and team2:
         teams = [team1, team2]
     stats = derive_player_stats_from_scorecards(scorecards)
+    keepers = derive_match_keepers_from_scorecards(scorecards)
     return {
         "match_id": str(match_id),
         "match_key": match_key,
@@ -1489,6 +1539,7 @@ def scrape_cricbuzz_match(match_id, slug):
         "teams": teams,
         "scorecards": scorecards,
         "stats": stats,
+        "keepers": sorted(keepers),
         "date_time_gmt": "",
         "is_complete": str(match_header.get("state") or "").lower() == "complete" or "won by" in status.lower(),
     }
@@ -1528,16 +1579,31 @@ def cricsheet_match_stats(match_data):
     return stats_by_player
 
 
-def apply_match_stats(state, match_key, match_name, match_number, match_date, stats_by_external_name, source):
+def apply_match_stats(
+    state,
+    match_key,
+    match_name,
+    match_number,
+    match_date,
+    stats_by_external_name,
+    source,
+    keeper_external_names=None,
+):
     mapped_count = 0
     player_lookup = {}
+    resolved_keepers = set()
+    for keeper_name in keeper_external_names or []:
+        resolved_keeper = resolve_player_name(keeper_name, state)
+        if resolved_keeper:
+            resolved_keepers.add(resolved_keeper)
+
     for owner in state["owners"]:
         for player in owner["players"]:
             player_lookup[player["player_name"]] = player
 
     for external_name, stats in stats_by_external_name.items():
         resolved = resolve_player_name(external_name, state)
-        if not resolved:
+        if not resolved or resolved not in player_lookup:
             continue
         player_lookup[resolved]["matches"][match_key] = {
             "match_name": match_name,
@@ -1547,6 +1613,7 @@ def apply_match_stats(state, match_key, match_name, match_number, match_date, st
             "wickets": int_value(stats.get("wickets")),
             "catches": int_value(stats.get("catches")),
             "stumpings": int_value(stats.get("stumpings")),
+            "is_keeper_in_match": resolved in resolved_keepers,
             "source": source,
             "last_updated": dt.datetime.now().isoformat(timespec="seconds"),
         }
@@ -1593,6 +1660,7 @@ def backfill_from_cricsheet(state):
         match_key = canonical_match_key(match_number, file_name.replace(".json", ""))
         match_name = " vs ".join(info.get("teams", []))
         stats = cricsheet_match_stats(match)
+        keeper_names = [name for name, player_stats in stats.items() if int_value(player_stats.get("stumpings")) > 0]
         apply_match_stats(
             state=state,
             match_key=match_key,
@@ -1601,6 +1669,7 @@ def backfill_from_cricsheet(state):
             match_date=str(dates[0]),
             stats_by_external_name=stats,
             source="cricsheet",
+            keeper_external_names=keeper_names,
         )
         processed += 1
     state["historical_backfill_at"] = dt.datetime.now().isoformat(timespec="seconds")
@@ -1623,16 +1692,33 @@ def refresh_live_from_cricbuzz(state):
             match_date=match["date_time_gmt"],
             stats_by_external_name=match["stats"],
             source="cricbuzz",
+            keeper_external_names=match.get("keepers", []),
         )
-        live_matches.append(
-            {
-                "id": match["match_key"],
-                "name": match["name"],
-                "status": match["status"],
-                "match_number": match["match_number"],
-                "score_summary": match["status"],
-            }
+        status_text = str(match.get("status", "")).lower()
+        is_live_like = not match.get("is_complete") and any(
+            token in status_text for token in ["need", "requires", "trail", "lead", "day", "session", "innings", "ov"]
         )
+        if is_live_like:
+            live_matches.append(
+                {
+                    "id": match["match_key"],
+                    "name": match["name"],
+                    "status": match["status"],
+                    "match_number": match["match_number"],
+                    "score_summary": match["status"],
+                }
+            )
+        elif not live_matches:
+            # Keep at least one latest IPL match visible as fallback if live heuristics miss.
+            live_matches.append(
+                {
+                    "id": match["match_key"],
+                    "name": match["name"],
+                    "status": match["status"],
+                    "match_number": match["match_number"],
+                    "score_summary": match["status"],
+                }
+            )
     state["live_matches"] = sorted(live_matches, key=lambda item: (item.get("match_number") is None, item.get("match_number") or 999))
     state["last_live_sync_at"] = dt.datetime.now().isoformat(timespec="seconds")
     return len(live_matches)
@@ -1641,9 +1727,9 @@ def refresh_live_from_cricbuzz(state):
 def maybe_refresh_state(force=False):
     state = load_state()
     now = dt.datetime.now()
-    if force or state.get("mapping_version") != 2:
+    if force or state.get("mapping_version") != 4:
         clear_all_match_stats(state)
-        state["mapping_version"] = 2
+        state["mapping_version"] = 4
     hist_due = force or not state.get("historical_backfill_at")
     live_due = force or not state.get("last_live_sync_at")
     if not hist_due and state.get("historical_backfill_at"):
